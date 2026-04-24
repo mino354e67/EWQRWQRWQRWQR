@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
@@ -30,6 +31,9 @@ type Config struct {
 	StateFilePath  string
 	GatewayBaseURL string
 	CooldownUSD    float64
+	AdminUser      string
+	AdminPassword  string
+	ProxyToken     string
 }
 
 type Key struct {
@@ -132,19 +136,37 @@ func init() {
 
 func main() {
 	cfg := readConfig()
+	if cfg.AdminUser == "" || cfg.AdminPassword == "" {
+		log.Fatal("ADMIN_USER and ADMIN_PASSWORD must be set")
+	}
+	if cfg.ProxyToken == "" {
+		log.Fatal("PROXY_TOKEN must be set")
+	}
+
 	state, err := loadState(cfg.StateFilePath, cfg.CooldownUSD)
 	if err != nil {
 		log.Fatalf("load state: %v", err)
 	}
 
+	admin := func(h http.HandlerFunc) http.HandlerFunc {
+		return basicAuth(cfg.AdminUser, cfg.AdminPassword, withCORS(h))
+	}
+	proxy := func(h http.HandlerFunc) http.HandlerFunc {
+		return bearerAuth(cfg.ProxyToken, withCORS(h))
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", serveIndex)
-	mux.HandleFunc("/api/state", withCORS(handleGetState(state, cfg)))
-	mux.HandleFunc("/api/refresh", withCORS(handleRefresh(state, cfg)))
-	mux.HandleFunc("/api/keys", withCORS(handleKeys(state, cfg)))
-	mux.HandleFunc("/api/keys/", withCORS(handleKeyByID(state, cfg)))
-	mux.HandleFunc("/v1", withCORS(handleGatewayProxy(state, cfg)))
-	mux.HandleFunc("/v1/", withCORS(handleGatewayProxy(state, cfg)))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/", basicAuth(cfg.AdminUser, cfg.AdminPassword, serveIndex))
+	mux.HandleFunc("/api/state", admin(handleGetState(state, cfg)))
+	mux.HandleFunc("/api/refresh", admin(handleRefresh(state, cfg)))
+	mux.HandleFunc("/api/keys", admin(handleKeys(state, cfg)))
+	mux.HandleFunc("/api/keys/", admin(handleKeyByID(state, cfg)))
+	mux.HandleFunc("/v1", proxy(handleGatewayProxy(state, cfg)))
+	mux.HandleFunc("/v1/", proxy(handleGatewayProxy(state, cfg)))
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -169,6 +191,9 @@ func readConfig() Config {
 			cfg.CooldownUSD = f
 		}
 	}
+	cfg.AdminUser = os.Getenv("ADMIN_USER")
+	cfg.AdminPassword = os.Getenv("ADMIN_PASSWORD")
+	cfg.ProxyToken = os.Getenv("PROXY_TOKEN")
 	return cfg
 }
 
@@ -800,6 +825,47 @@ func withCORS(h http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		h(w, r)
+	}
+}
+
+func basicAuth(user, pass string, h http.HandlerFunc) http.HandlerFunc {
+	expectedUser := []byte(user)
+	expectedPass := []byte(pass)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			h(w, r)
+			return
+		}
+		u, p, ok := r.BasicAuth()
+		if !ok ||
+			subtle.ConstantTimeCompare([]byte(u), expectedUser) != 1 ||
+			subtle.ConstantTimeCompare([]byte(p), expectedPass) != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="AI Gateway Admin"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		h(w, r)
+	}
+}
+
+func bearerAuth(token string, h http.HandlerFunc) http.HandlerFunc {
+	expected := []byte(token)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			h(w, r)
+			return
+		}
+		header := r.Header.Get("Authorization")
+		if !strings.HasPrefix(header, "Bearer ") {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		got := strings.TrimPrefix(header, "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(got), expected) != 1 {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
 		h(w, r)
 	}
 }
