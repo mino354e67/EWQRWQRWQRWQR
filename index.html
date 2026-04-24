@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Gateway Key Poller</title>
+  <style>
+    :root {
+      --bg: #f6f7f4;
+      --panel: #ffffff;
+      --ink: #1e2a22;
+      --muted: #5f6f64;
+      --line: #d7ddd8;
+      --accent: #1d7a52;
+      --danger: #9b2b2b;
+      --warn: #a66b00;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background: radial-gradient(1200px 500px at 10% -10%, #dbece2 0%, transparent 70%), var(--bg);
+    }
+    .wrap { max-width: 1040px; margin: 0 auto; padding: 20px 16px 32px; }
+    h1 { margin: 0 0 8px; font-size: 26px; }
+    .sub { color: var(--muted); margin-bottom: 16px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 6px 20px rgba(12, 42, 28, 0.06);
+    }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    input, button {
+      height: 38px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      padding: 0 10px;
+      font-size: 14px;
+    }
+    input { background: #fff; min-width: 180px; flex: 1; }
+    button { cursor: pointer; background: #fff; }
+    .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn-danger { background: #fff5f5; border-color: #f3c0c0; color: var(--danger); }
+    .btn-warn { background: #fff8e6; border-color: #f3d798; color: var(--warn); }
+    .meta { margin-top: 10px; color: var(--muted); font-size: 13px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 14px;
+      font-size: 14px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    .ops { display: flex; gap: 6px; flex-wrap: wrap; }
+    .tag {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      background: #f8faf8;
+    }
+    .tag.paused { color: var(--danger); border-color: #e7b3b3; background: #fff4f4; }
+    .err { color: var(--danger); max-width: 360px; word-break: break-word; }
+    @media (max-width: 760px) {
+      table, thead, tbody, th, td, tr { display: block; }
+      thead { display: none; }
+      tr { border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; padding: 8px; background: #fff; }
+      td { border: none; padding: 6px 4px; }
+      td::before { content: attr(data-label) ": "; color: var(--muted); font-weight: 600; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>AI Gateway 轮询器 + 代理</h1>
+    <div class="sub">每个 Key 独立统计月度额度，默认每月达到 5 美元自动冷却（暂停轮询）。代理地址: <code>http://localhost:9090/v1</code></div>
+
+    <div class="card">
+      <div class="row">
+        <input id="name" placeholder="自定义 Key 名称" />
+        <input id="email" placeholder="邮箱(可留空)" />
+        <input id="apiKey" placeholder="AI Gateway API Key" />
+        <button class="btn-primary" onclick="createKey()">新增 Key</button>
+        <button class="btn-primary" onclick="refreshBalanceAll()">刷新余额(全部)</button>
+        <button onclick="loadState()">刷新</button>
+      </div>
+      <div class="meta" id="meta"></div>
+      <table>
+        <thead>
+          <tr>
+            <th>名称</th>
+            <th>邮箱</th>
+            <th>月度已用(USD)</th>
+            <th>余额/累计</th>
+            <th>代理调用</th>
+            <th>状态</th>
+            <th>错误</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const fmt = (n) => Number(n || 0).toFixed(2);
+    const dt = (s) => s ? new Date(s).toLocaleString() : "-";
+
+    async function api(path, opts = {}) {
+      const r = await fetch(path, Object.assign({ headers: { "Content-Type": "application/json" } }, opts));
+      const text = await r.text();
+      let j = {};
+      try { j = text ? JSON.parse(text) : {}; } catch (_) { j = {}; }
+      if (!r.ok) {
+        const msg = j.error || text || ("http " + r.status);
+        throw new Error(msg);
+      }
+      return j;
+    }
+
+    async function loadState() {
+      try {
+        const s = await api('/api/state');
+        document.getElementById('meta').textContent = '当前月份: ' + s.month + ' | 自动冷却阈值: $' + fmt(s.cooldown_usd) + ' | Key 数: ' + s.keys.length;
+        const tbody = document.getElementById('tbody');
+        tbody.innerHTML = '';
+        for (const k of s.keys) {
+          const tr = document.createElement('tr');
+          tr.innerHTML =
+            '<td data-label="名称">' + esc(k.name) + '</td>' +
+            '<td data-label="邮箱">' + esc(k.email) + '</td>' +
+            '<td data-label="月度已用">$' + fmt(k.monthly_spent_usd) + '</td>' +
+            '<td data-label="余额/累计">$' + fmt(k.last_balance) + ' / $' + fmt(k.last_used_total) + '<br><span class="tag">轮询 ' + (k.request_count || 0) + ' 次</span><span class="tag">' + dt(k.last_poll_at) + '</span></td>' +
+            '<td data-label="代理调用"><span class="tag">' + (k.proxy_request_count || 0) + ' 次</span><span class="tag">' + dt(k.last_proxy_at) + '</span></td>' +
+            '<td data-label="状态">' + (k.paused ? '<span class="tag paused">已冷却</span>' : '<span class="tag">正常</span>') + '</td>' +
+            '<td data-label="错误"><span class="err">' + esc(k.last_err || '') + '</span></td>' +
+            '<td data-label="操作"><div class="ops">' +
+              '<button onclick="renameKey(\'' + k.id + '\', \'' + escJS(k.name) + '\')">改名</button>' +
+              '<button onclick="changeEmail(\'' + k.id + '\', \'' + escJS(k.email) + '\')">改邮箱</button>' +
+              '<button onclick="refreshBalanceOne(\'' + k.id + '\')">刷新余额</button>' +
+              '<button class="btn-warn" onclick="togglePause(\'' + k.id + '\',' + (!k.paused) + ')">' + (k.paused ? '恢复' : '手动暂停') + '</button>' +
+              '<button onclick="resetCost(\'' + k.id + '\')">重置月度额度</button>' +
+              '<button class="btn-danger" onclick="deleteKey(\'' + k.id + '\')">删除</button>' +
+            '</div></td>';
+          tbody.appendChild(tr);
+        }
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    function esc(s) {
+      return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    function escJS(s) {
+      return String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    }
+
+    async function createKey() {
+      try {
+        const name = document.getElementById('name').value.trim();
+      const email = document.getElementById('email').value.trim();
+      const api_key = document.getElementById('apiKey').value.trim();
+      if (!name || !api_key) {
+        alert('请填写 名称/API Key');
+        return;
+      }
+        await api('/api/keys', { method: 'POST', body: JSON.stringify({ name, email, api_key }) });
+        document.getElementById('name').value = '';
+        document.getElementById('email').value = '';
+        document.getElementById('apiKey').value = '';
+        await loadState();
+      } catch (e) {
+        alert('新增失败: ' + e.message);
+      }
+    }
+
+    async function refreshBalanceAll() {
+      try {
+        const res = await api('/api/refresh', { method: 'POST', body: '{}' });
+        const fail = Object.keys(res.errors || {}).length;
+        if (fail > 0) {
+          alert('刷新完成，成功 ' + (res.refreshed || 0) + '，失败 ' + fail);
+        }
+        await loadState();
+      } catch (e) {
+        alert('刷新失败: ' + e.message);
+      }
+    }
+
+    async function refreshBalanceOne(id) {
+      try {
+        const res = await api('/api/refresh', { method: 'POST', body: JSON.stringify({ id }) });
+        const fail = Object.keys(res.errors || {}).length;
+        if (fail > 0) {
+          alert('该 Key 刷新失败: ' + (res.errors[id] || 'unknown'));
+        }
+        await loadState();
+      } catch (e) {
+        alert('刷新失败: ' + e.message);
+      }
+    }
+
+    async function renameKey(id, oldName) {
+      try {
+        const name = prompt('输入新名称', oldName);
+        if (!name) return;
+        await api('/api/keys/' + id, { method: 'PATCH', body: JSON.stringify({ name }) });
+        await loadState();
+      } catch (e) {
+        alert('改名失败: ' + e.message);
+      }
+    }
+
+    async function changeEmail(id, oldEmail) {
+      try {
+        const email = prompt('输入新邮箱(可留空)', oldEmail);
+        if (email === null) return;
+        await api('/api/keys/' + id, { method: 'PATCH', body: JSON.stringify({ email: String(email).trim() }) });
+        await loadState();
+      } catch (e) {
+        alert('改邮箱失败: ' + e.message);
+      }
+    }
+
+    async function togglePause(id, paused) {
+      try {
+        await api('/api/keys/' + id, { method: 'PATCH', body: JSON.stringify({ paused }) });
+        await loadState();
+      } catch (e) {
+        alert('操作失败: ' + e.message);
+      }
+    }
+
+    async function resetCost(id) {
+      try {
+        await api('/api/keys/' + id, { method: 'PATCH', body: JSON.stringify({ reset_cost: true }) });
+        await loadState();
+      } catch (e) {
+        alert('重置失败: ' + e.message);
+      }
+    }
+
+    async function deleteKey(id) {
+      try {
+        if (!confirm('确定删除这个 key?')) return;
+        await api('/api/keys/' + id, { method: 'DELETE' });
+        await loadState();
+      } catch (e) {
+        alert('删除失败: ' + e.message);
+      }
+    }
+
+    loadState();
+  </script>
+</body>
+</html>
