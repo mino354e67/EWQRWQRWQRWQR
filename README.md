@@ -70,12 +70,16 @@ That's all that's needed — Caddy handles the certificate automatically.
 
 ```bash
 export ADMIN_USER=admin
-export ADMIN_PASSWORD=hunter2
-export PROXY_TOKEN=dev-token
+export ADMIN_PASSWORD=localdev-password  # must be >= 12 chars
+export PROXY_TOKEN=$(openssl rand -hex 32)
 
 go run .
 # open http://127.0.0.1:9090 — browser will prompt for the admin credentials
 ```
+
+The service refuses to start if `ADMIN_PASSWORD` is shorter than 12 characters
+or `PROXY_TOKEN` is shorter than 24 characters, to prevent silent deployment
+with weak credentials.
 
 ## Using the proxy from an OpenAI-compatible SDK
 
@@ -95,3 +99,65 @@ resp = client.chat.completions.create(
 The proxy strips your `PROXY_TOKEN` header and replaces it with one of the
 stored Gateway API keys before forwarding upstream, so your pool keys never
 leave the server.
+
+## Security posture & testing
+
+Once deployed on a public VPS, the service is fingerprintable by internet-wide
+scanners (Shodan, Censys, nuclei-driven bots). To verify nothing exploitable
+is exposed, run the included scan script against your own deployment:
+
+```bash
+./scripts/abuse-scan.sh https://gateway.example.com
+```
+
+The script performs six checks: fingerprint surface, common-path enumeration,
+Bearer brute-force productivity, Basic-auth brute-force productivity, a nuclei
+exposures scan, and local git/secret hygiene. Optional tools (`ffuf`, `hydra`,
+`nuclei`, `gitleaks`) are used if installed, or the corresponding check SKIPs
+with install hints. The script exits non-zero on any FAIL, so it can be wired
+into CI.
+
+### Built-in defenses
+
+- **Per-IP failed-auth rate limit**: after `AUTH_FAIL_LIMIT` (default 10) bad
+  credentials in 60 seconds, the client's IP is blocked for
+  `AUTH_BLOCK_MINUTES` (default 15) on both `/api/*` and `/v1/*`. The block
+  response is `429` with a `Retry-After` header. Set `AUTH_FAIL_LIMIT=0` to
+  disable in emergencies.
+- **Entropy enforcement**: startup refuses to run with `ADMIN_PASSWORD < 12`
+  chars or `PROXY_TOKEN < 24` chars.
+- **Generic realm**: Basic Auth advertises `realm="Restricted"` rather than
+  any product-identifying string, so Shodan/Censys searches don't surface this
+  deployment to anyone grepping for the software by name.
+- **`/healthz`** is the only unauthenticated endpoint; it returns a literal
+  `ok` and leaks no other information.
+
+### fail2ban integration
+
+Every failed attempt is logged as a single-line record prefixed with
+`auth_fail `, e.g.:
+
+```
+2026/04/24 09:12:04 auth_fail ip=203.0.113.7 path=/api/state ua="curl/8.1" scheme=basic
+```
+
+Point fail2ban at the Docker log stream (or your reverse-proxy access log if
+you're propagating `X-Forwarded-For` in) with a filter like:
+
+```ini
+# /etc/fail2ban/filter.d/ai-gateway.conf
+[Definition]
+failregex = ^.*auth_fail ip=<HOST> .*$
+```
+
+and a jail that reads the container's log file or `journalctl -u docker`.
+This turns repeated 429s into OS-level packet drops.
+
+### What's intentionally NOT protected
+
+- **Targeted attacker with the correct domain name**: there's no mTLS or
+  IP allowlist in-app. If you need those, configure them in your reverse
+  proxy (Caddy: `@allowed { remote_ip ... }`, Nginx: `allow/deny`).
+- **Supply-chain leak of `PROXY_TOKEN`**: if a client app accidentally
+  commits it to a public repo, the token is compromised. Rotate by editing
+  `.env` and `docker compose up -d`. SDK clients must be updated.

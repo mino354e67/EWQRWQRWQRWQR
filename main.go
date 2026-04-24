@@ -142,17 +142,25 @@ func main() {
 	if cfg.ProxyToken == "" {
 		log.Fatal("PROXY_TOKEN must be set")
 	}
+	if len(cfg.ProxyToken) < 24 {
+		log.Fatal("PROXY_TOKEN must be at least 24 characters (use: openssl rand -hex 32)")
+	}
+	if len(cfg.AdminPassword) < 12 {
+		log.Fatal("ADMIN_PASSWORD must be at least 12 characters")
+	}
 
 	state, err := loadState(cfg.StateFilePath, cfg.CooldownUSD)
 	if err != nil {
 		log.Fatalf("load state: %v", err)
 	}
 
+	limiter := authLimiterFromEnv(os.Getenv)
+
 	admin := func(h http.HandlerFunc) http.HandlerFunc {
-		return basicAuth(cfg.AdminUser, cfg.AdminPassword, withCORS(h))
+		return basicAuth(cfg.AdminUser, cfg.AdminPassword, limiter, withCORS(h))
 	}
 	proxy := func(h http.HandlerFunc) http.HandlerFunc {
-		return bearerAuth(cfg.ProxyToken, withCORS(h))
+		return bearerAuth(cfg.ProxyToken, limiter, withCORS(h))
 	}
 
 	mux := http.NewServeMux()
@@ -160,7 +168,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/", basicAuth(cfg.AdminUser, cfg.AdminPassword, serveIndex))
+	mux.HandleFunc("/", basicAuth(cfg.AdminUser, cfg.AdminPassword, limiter, serveIndex))
 	mux.HandleFunc("/api/state", admin(handleGetState(state, cfg)))
 	mux.HandleFunc("/api/refresh", admin(handleRefresh(state, cfg)))
 	mux.HandleFunc("/api/keys", admin(handleKeys(state, cfg)))
@@ -829,7 +837,7 @@ func withCORS(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func basicAuth(user, pass string, h http.HandlerFunc) http.HandlerFunc {
+func basicAuth(user, pass string, limiter *authLimiter, h http.HandlerFunc) http.HandlerFunc {
 	expectedUser := []byte(user)
 	expectedPass := []byte(pass)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -837,11 +845,19 @@ func basicAuth(user, pass string, h http.HandlerFunc) http.HandlerFunc {
 			h(w, r)
 			return
 		}
+		ip := clientIP(r)
+		if ok, retry := limiter.allow(ip); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many failed attempts"})
+			return
+		}
 		u, p, ok := r.BasicAuth()
 		if !ok ||
 			subtle.ConstantTimeCompare([]byte(u), expectedUser) != 1 ||
 			subtle.ConstantTimeCompare([]byte(p), expectedPass) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="AI Gateway Admin"`)
+			limiter.recordFailure(ip)
+			log.Printf("auth_fail ip=%s path=%s ua=%q scheme=basic", ip, r.URL.Path, r.UserAgent())
+			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
@@ -849,20 +865,30 @@ func basicAuth(user, pass string, h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func bearerAuth(token string, h http.HandlerFunc) http.HandlerFunc {
+func bearerAuth(token string, limiter *authLimiter, h http.HandlerFunc) http.HandlerFunc {
 	expected := []byte(token)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
 			h(w, r)
 			return
 		}
+		ip := clientIP(r)
+		if ok, retry := limiter.allow(ip); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many failed attempts"})
+			return
+		}
 		header := r.Header.Get("Authorization")
 		if !strings.HasPrefix(header, "Bearer ") {
+			limiter.recordFailure(ip)
+			log.Printf("auth_fail ip=%s path=%s ua=%q scheme=bearer reason=no_header", ip, r.URL.Path, r.UserAgent())
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
 		got := strings.TrimPrefix(header, "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(got), expected) != 1 {
+			limiter.recordFailure(ip)
+			log.Printf("auth_fail ip=%s path=%s ua=%q scheme=bearer reason=bad_token", ip, r.URL.Path, r.UserAgent())
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}

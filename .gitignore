@@ -1,0 +1,6 @@
+.env
+.env.*
+!.env.example
+main.exe
+state.json
+*.tmp
