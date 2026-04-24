@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+credentials.txt
 main.exe
 state.json
 *.tmp
