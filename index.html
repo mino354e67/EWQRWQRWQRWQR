@@ -71,6 +71,32 @@
     }
     .tag.paused { color: var(--danger); border-color: #e7b3b3; background: #fff4f4; }
     .err { color: var(--danger); max-width: 360px; word-break: break-word; }
+    .toast-container {
+      position: fixed; bottom: 20px; right: 20px; z-index: 999;
+      display: flex; flex-direction: column; gap: 10px; max-width: 420px;
+    }
+    .toast {
+      position: relative; background: #fff;
+      border: 1px solid var(--line); border-left-width: 4px;
+      border-radius: 10px; padding: 12px 30px 12px 14px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.12); font-size: 13px;
+      animation: toastIn 0.2s;
+    }
+    .toast-ok  { border-left-color: var(--accent); }
+    .toast-err { border-left-color: var(--danger); }
+    .toast-body {
+      margin-top: 6px; font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: 12px; white-space: pre-wrap; word-break: break-word;
+      color: var(--ink);
+    }
+    .toast-close {
+      position: absolute; top: 4px; right: 10px; cursor: pointer;
+      color: var(--muted); font-size: 18px; line-height: 1;
+    }
+    @keyframes toastIn {
+      from { transform: translateX(20px); opacity: 0; }
+      to   { transform: translateX(0);    opacity: 1; }
+    }
     @media (max-width: 760px) {
       table, thead, tbody, th, td, tr { display: block; }
       thead { display: none; }
@@ -113,6 +139,8 @@
     </div>
   </div>
 
+  <div id="toasts" class="toast-container"></div>
+
   <script>
     const fmt = (n) => Number(n || 0).toFixed(2);
     const dt = (s) => s ? new Date(s).toLocaleString() : "-";
@@ -149,6 +177,7 @@
               '<button onclick="renameKey(\'' + k.id + '\', \'' + escJS(k.name) + '\')">改名</button>' +
               '<button onclick="changeEmail(\'' + k.id + '\', \'' + escJS(k.email) + '\')">改邮箱</button>' +
               '<button onclick="refreshBalanceOne(\'' + k.id + '\')">刷新余额</button>' +
+              '<button onclick="testKey(\'' + k.id + '\', this)">测试调用</button>' +
               '<button class="btn-warn" onclick="togglePause(\'' + k.id + '\',' + (!k.paused) + ')">' + (k.paused ? '恢复' : '手动暂停') + '</button>' +
               '<button onclick="resetCost(\'' + k.id + '\')">重置月度额度</button>' +
               '<button class="btn-danger" onclick="deleteKey(\'' + k.id + '\')">删除</button>' +
@@ -166,6 +195,53 @@
 
     function escJS(s) {
       return String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    }
+
+    function showToast(html, ok) {
+      const wrap = document.getElementById('toasts');
+      const t = document.createElement('div');
+      t.className = 'toast ' + (ok ? 'toast-ok' : 'toast-err');
+      t.innerHTML = html +
+        '<span class="toast-close" onclick="this.parentNode.remove()">&times;</span>';
+      wrap.appendChild(t);
+      setTimeout(() => { t.remove(); }, 15000);
+    }
+
+    async function testKey(id, btn) {
+      const orig = btn.textContent;
+      btn.textContent = '测试中…';
+      btn.disabled = true;
+      try {
+        const r = await api('/api/test', {
+          method: 'POST',
+          body: JSON.stringify({ id }),
+        });
+        if (r.ok) {
+          const u = r.usage || {};
+          showToast(
+            '✓ <b>测试成功</b> · ' + r.latency_ms + ' ms<br>' +
+            '<span class="tag">' + esc(r.model) + '</span> ' +
+            '<span class="tag">tokens: ' +
+              (u.prompt || 0) + ' + ' + (u.completion || 0) +
+              ' = ' + (u.total || 0) + '</span>' +
+            '<div class="toast-body">' + esc(r.reply || '(empty)') + '</div>',
+            true
+          );
+        } else {
+          showToast(
+            '✗ <b>测试失败</b>' + (r.status ? ' · HTTP ' + r.status : '') +
+              ' · ' + (r.latency_ms || 0) + ' ms<br>' +
+            '<span class="tag">' + esc(r.model || 'deepseek/deepseek-v4-flash') + '</span>' +
+            '<div class="toast-body">' + esc(r.error || 'unknown error') + '</div>',
+            false
+          );
+        }
+      } catch (e) {
+        showToast('✗ <b>测试失败</b><br><div class="toast-body">' + esc(e.message) + '</div>', false);
+      } finally {
+        btn.textContent = orig;
+        btn.disabled = false;
+      }
     }
 
     async function createKey() {

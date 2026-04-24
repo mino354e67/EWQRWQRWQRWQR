@@ -98,6 +98,24 @@ type refreshReq struct {
 	ID string `json:"id"`
 }
 
+type testReq struct {
+	ID    string `json:"id"`
+	Model string `json:"model,omitempty"`
+}
+
+type chatCompletionResp struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+}
+
 // CreditsResp matches what https://ai-gateway.vercel.sh/v1/credits actually
 // returns: a flat object whose numeric values are JSON-encoded strings, e.g.
 //   {"balance":"4.9998516","total_used":"0.0001484"}
@@ -172,6 +190,7 @@ func main() {
 	mux.HandleFunc("/", basicAuth(cfg.AdminUser, cfg.AdminPassword, limiter, serveIndex))
 	mux.HandleFunc("/api/state", admin(handleGetState(state, cfg)))
 	mux.HandleFunc("/api/refresh", admin(handleRefresh(state, cfg)))
+	mux.HandleFunc("/api/test", admin(handleTest(state, cfg)))
 	mux.HandleFunc("/api/keys", admin(handleKeys(state, cfg)))
 	mux.HandleFunc("/api/keys/", admin(handleKeyByID(state, cfg)))
 	mux.HandleFunc("/v1", proxy(handleGatewayProxy(state, cfg)))
@@ -421,6 +440,117 @@ func handleRefresh(state *AppState, cfg Config) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"refreshed": refreshed,
 			"errors":    errs,
+		})
+	}
+}
+
+func handleTest(state *AppState, cfg Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		var req testReq
+		_ = json.Unmarshal(body, &req)
+		if req.ID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id is required"})
+			return
+		}
+		model := strings.TrimSpace(req.Model)
+		if model == "" {
+			model = "deepseek/deepseek-v4-flash"
+		}
+
+		state.mu.RLock()
+		k, ok := state.Keys[req.ID]
+		var apiKey string
+		if ok {
+			apiKey = k.APIKey
+		}
+		state.mu.RUnlock()
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "key not found"})
+			return
+		}
+		if strings.TrimSpace(apiKey) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "empty api key"})
+			return
+		}
+
+		payload, _ := json.Marshal(map[string]any{
+			"model":      model,
+			"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+			"max_tokens": 5,
+			"stream":     false,
+		})
+
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		httpReq, err := http.NewRequestWithContext(ctx, "POST",
+			cfg.GatewayBaseURL+"/chat/completions", bytes.NewReader(payload))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		start := time.Now()
+		resp, err := proxyHTTPClient.Do(httpReq)
+		latencyMs := time.Since(start).Milliseconds()
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":         false,
+				"model":      model,
+				"latency_ms": latencyMs,
+				"error":      err.Error(),
+			})
+			return
+		}
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+
+		log.Printf("test_call key=%s model=%s status=%d latency_ms=%d",
+			req.ID, model, resp.StatusCode, latencyMs)
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			snippet := strings.TrimSpace(string(respBody))
+			if len(snippet) > 400 {
+				snippet = snippet[:400] + "..."
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":         false,
+				"model":      model,
+				"latency_ms": latencyMs,
+				"status":     resp.StatusCode,
+				"error":      snippet,
+			})
+			return
+		}
+
+		var parsed chatCompletionResp
+		_ = json.Unmarshal(respBody, &parsed)
+		reply := ""
+		if len(parsed.Choices) > 0 {
+			reply = parsed.Choices[0].Message.Content
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":         true,
+			"model":      model,
+			"latency_ms": latencyMs,
+			"status":     resp.StatusCode,
+			"reply":      reply,
+			"usage": map[string]int{
+				"prompt":     parsed.Usage.PromptTokens,
+				"completion": parsed.Usage.CompletionTokens,
+				"total":      parsed.Usage.TotalTokens,
+			},
 		})
 	}
 }
