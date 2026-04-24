@@ -130,23 +130,31 @@ if ! curl -fsS "$HEALTHZ_URL" >/dev/null 2>&1; then
 fi
 
 # ── 7. 总结 ──────────────────────────────────────────────────
-HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
-HOST_IP=${HOST_IP:-127.0.0.1}
 echo
 printf '%s%s==================================================%s\n' "$BOLD" "$GREEN" "$NC"
 printf '%s  部署完成 ✓%s\n' "$BOLD" "$NC"
 printf '%s%s==================================================%s\n' "$BOLD" "$GREEN" "$NC"
 echo
-echo "  管理后台   : http://$HOST_IP:9090/"
-echo "  用户名     : $ADMIN_USER"
-echo "  密码       : 见 $CRED_FILE"
+echo "  容器监听     : 127.0.0.1:9090（docker-compose 默认只绑 localhost）"
+echo "  用户名       : $ADMIN_USER"
+echo "  凭证备份     : $CRED_FILE"
 echo
-echo "  SDK base_url : http://$HOST_IP:9090/v1"
-echo "  SDK api_key  : 见 $CRED_FILE 里的 PROXY_TOKEN"
+printf '%s在 VPS 上自测（先验证服务本身起来了）：%s\n' "$BLUE" "$NC"
+cat <<EOF
+    curl http://127.0.0.1:9090/healthz
+    # → ok
+
+    curl -u "$ADMIN_USER:<你刚输入的密码>" http://127.0.0.1:9090/api/state
+    # → {"cooldown_usd":5,"month":"...","keys":[]}
+EOF
 echo
-printf '%s下一步：%s\n' "$BLUE" "$NC"
-echo "  1) 浏览器打开上面的管理后台 URL，添加你的 Vercel AI Gateway Key"
-echo "  2) 把凭证存到密码管理器，然后删掉 credentials.txt"
-echo "  3) 想加 HTTPS 看 README 的「加 HTTPS」章节"
+printf '%s要让外部访问，必须配反向代理（容器只绑在 127.0.0.1）：%s\n' "$BLUE" "$NC"
+echo "    Caddy / Nginx / Cloudflare Tunnel 选一种"
+echo "    详见 README.md → 「加 HTTPS」章节"
 echo
+printf '%s配好反代后，SDK 里这样填：%s\n' "$BLUE" "$NC"
+echo "    base_url = https://<你的域名>/v1"
+echo "    api_key  = $CRED_FILE 里的 PROXY_TOKEN"
+echo
+printf '%s最后：%s凭证拷进密码管理器后，%sshred -u $CRED_FILE%s\n' "$YEL" "$NC" "$BOLD" "$NC"
 printf '%s%s==================================================%s\n' "$BOLD" "$GREEN" "$NC"

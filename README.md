@@ -19,24 +19,16 @@ bash install.sh
 ```
 
 `install.sh` 会交互式问你管理员用户名密码、生成随机 `PROXY_TOKEN`、写 `.env`
-和 `credentials.txt`（都 `chmod 600`）、起容器、等健康检查通过，最后打印访问
-信息。大概长这样：
+和 `credentials.txt`（都 `chmod 600`）、起容器、等健康检查通过，最后打印后续
+步骤。
 
-```
-==================================================
-  部署完成 ✓
-==================================================
+**注意**：容器默认**只绑在 `127.0.0.1:9090`**，从外部访问必须配反向代理。
+这是故意的 —— 直接把 9090 暴露到公网上、没 HTTPS 没速率限制前的 Nginx/Caddy
+保护，是在拿你的 Gateway 余额赌。所以完整流程是：
 
-  管理后台   : http://203.0.113.10:9090/
-  用户名     : admin
-  密码       : 见 /home/you/ai-gateway/credentials.txt
-
-  SDK base_url : http://203.0.113.10:9090/v1
-  SDK api_key  : 见 credentials.txt 里的 PROXY_TOKEN
-```
-
-浏览器打开那个 URL，输入 `admin` + 密码就能看到管理后台，在里面添加你的
-Vercel AI Gateway Key 就能用了。
+1. 跑完 `install.sh`，在 VPS 上自己 `curl http://127.0.0.1:9090/healthz` 验证
+2. 配反向代理（下节三选一）
+3. 在 SDK 里用 `https://<你的域名>/v1`
 
 > **非交互式**（脚本 / CI）：
 > `ADMIN_USER=admin ADMIN_PASSWORD='your-12+chars' bash install.sh`
