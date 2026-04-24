@@ -98,11 +98,12 @@ type refreshReq struct {
 	ID string `json:"id"`
 }
 
+// CreditsResp matches what https://ai-gateway.vercel.sh/v1/credits actually
+// returns: a flat object whose numeric values are JSON-encoded strings, e.g.
+//   {"balance":"4.9998516","total_used":"0.0001484"}
 type CreditsResp struct {
-	Data struct {
-		Balance   float64 `json:"balance"`
-		TotalUsed float64 `json:"total_used"`
-	} `json:"data"`
+	Balance   float64 `json:"balance,string"`
+	TotalUsed float64 `json:"total_used,string"`
 }
 
 type proxyCandidate struct {
@@ -307,10 +308,10 @@ func pollOne(ctx context.Context, state *AppState, cfg Config, id string) error 
 	}
 	k.RequestCount++
 	k.LastErr = ""
-	k.LastBalance = resp.Data.Balance
-	k.LastUsedTotal = resp.Data.TotalUsed
-	if resp.Data.TotalUsed > prevUsed {
-		k.MonthlySpentUSD += resp.Data.TotalUsed - prevUsed
+	k.LastBalance = resp.Balance
+	k.LastUsedTotal = resp.TotalUsed
+	if resp.TotalUsed > prevUsed {
+		k.MonthlySpentUSD += resp.TotalUsed - prevUsed
 	}
 	if k.MonthlySpentUSD >= state.Cooldown {
 		k.Paused = true
@@ -347,8 +348,8 @@ func fetchCredits(ctx context.Context, baseURL, apiKey string) (*CreditsResp, er
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, fmt.Errorf("upstream status=%d body=%s", resp.StatusCode, string(body))
 	}
-	log.Printf("credits_probe status=%d balance=%v total_used=%v body=%s",
-		resp.StatusCode, out.Data.Balance, out.Data.TotalUsed, string(body))
+	log.Printf("credits_refresh status=%d balance=%.6f total_used=%.6f",
+		resp.StatusCode, out.Balance, out.TotalUsed)
 	return &out, nil
 }
 
