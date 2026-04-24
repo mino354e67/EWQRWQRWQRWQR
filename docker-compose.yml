@@ -1,0 +1,26 @@
+services:
+  app:
+    build: .
+    image: ai-gateway-poller:latest
+    container_name: ai-gateway-poller
+    restart: unless-stopped
+    environment:
+      LISTEN_ADDR: ":9090"
+      STATE_DIR: /data
+      GATEWAY_BASE_URL: ${GATEWAY_BASE_URL:-https://ai-gateway.vercel.sh/v1}
+      MONTHLY_COOLDOWN_USD: ${MONTHLY_COOLDOWN_USD:-5}
+      ADMIN_USER: ${ADMIN_USER}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      PROXY_TOKEN: ${PROXY_TOKEN}
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - gateway-state:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  gateway-state:
