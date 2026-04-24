@@ -347,6 +347,8 @@ func fetchCredits(ctx context.Context, baseURL, apiKey string) (*CreditsResp, er
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, fmt.Errorf("upstream status=%d body=%s", resp.StatusCode, string(body))
 	}
+	log.Printf("credits_probe status=%d balance=%v total_used=%v body=%s",
+		resp.StatusCode, out.Data.Balance, out.Data.TotalUsed, string(body))
 	return &out, nil
 }
 
